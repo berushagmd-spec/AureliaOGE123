@@ -64,7 +64,7 @@ WELCOME_TEXT = fix_dashes("""
 
 Ты подтверждаешь, что ознакомлен(а) с правилами оформления постов и поведения админа в проекте и готов(а) пройти тест.
 
-Дальше будет несколько вопросов с вариантами ответа (баллы начисляются автоматически) и несколько открытых вопросов (их оценят проверяющие вручную). Результат вместе с баллами уйдет в закрытую группу админов - именно они принимают финальное решение, выдавать админку или нет.
+Дальше будет несколько вопросов с вариантами ответа - баллы за них начисляются автоматически. Результат вместе с баллами уйдет в закрытую группу админов - именно они принимают финальное решение, выдавать админку или нет.
 
 Нажми "Согласен(на)" ниже, чтобы начать тест.
 """).strip()
@@ -104,10 +104,18 @@ def build_agreement_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def truncate_button_text(text: str, max_len: int = 55) -> str:
+    """Обрезает текст варианта ответа, чтобы он помещался в кнопку Telegram."""
+    text = fix_dashes(text)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
 def build_mc_keyboard(q_index: int, options: list[str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, opt in enumerate(options):
-        kb.button(text=opt, callback_data=f"ans:{q_index}:{i}")
+        kb.button(text=truncate_button_text(opt), callback_data=f"ans:{q_index}:{i}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -287,10 +295,11 @@ async def on_mc_answer(callback: CallbackQuery, state: FSMContext):
         }
     )
 
+    # Не сообщаем пользователю, правильный это ответ или нет - это известно только проверяющим.
     await callback.message.edit_text(
         fix_dashes(
             f"{callback.message.text}\n\n"
-            f"{'✅ Верно!' if is_correct else '❌ Неверно.'} (+{points_earned} балл(ов))"
+            f"Ответ принят: {question['options'][opt_index]}"
         )
     )
 
@@ -300,36 +309,26 @@ async def on_mc_answer(callback: CallbackQuery, state: FSMContext):
     if new_idx < len(mc_questions):
         await send_next_mc_question(callback, state)
     else:
-        await callback.message.answer(
-            fix_dashes(
-                "С вопросами по вариантам ответа покончено 🎉\n\n"
-                "Теперь несколько открытых вопросов - отвечай текстом одним сообщением на каждый."
+        open_questions = data["open_questions"]
+        if open_questions:
+            await callback.message.answer(
+                fix_dashes(
+                    "С вопросами по вариантам ответа покончено 🎉\n\n"
+                    "Теперь несколько открытых вопросов - отвечай текстом одним сообщением на каждый."
+                )
             )
-        )
-        await state.set_state(ExamStates.in_open_test)
-        await send_next_open_question(callback.message, state)
+            await state.set_state(ExamStates.in_open_test)
+            await send_next_open_question(callback.message, state)
+        else:
+            await finish_exam(callback.message, callback.from_user, state)
 
     await callback.answer()
 
 
-@router.message(ExamStates.in_open_test)
-async def on_open_answer(message: Message, state: FSMContext):
+async def finish_exam(message: Message, user, state: FSMContext):
+    """Формирует и отправляет итоговый отчет в группу проверяющих."""
     data = await state.get_data()
-    open_answers = data["open_answers"]
-    idx = data["open_index"]
-    open_questions = data["open_questions"]
-
-    open_answers.append(message.text or "(пустой ответ)")
-    new_idx = idx + 1
-    await state.update_data(open_answers=open_answers, open_index=new_idx)
-
-    if new_idx < len(open_questions):
-        await send_next_open_question(message, state)
-        return
-
-    # Тест завершен - формируем и отправляем отчет
-    data = await state.get_data()
-    report = build_report(message.from_user, data)
+    report = build_report(user, data)
 
     bot: Bot = message.bot
     try:
@@ -347,6 +346,24 @@ async def on_open_answer(message: Message, state: FSMContext):
 
     await message.answer(DONE_TEXT)
     await state.clear()
+
+
+@router.message(ExamStates.in_open_test)
+async def on_open_answer(message: Message, state: FSMContext):
+    data = await state.get_data()
+    open_answers = data["open_answers"]
+    idx = data["open_index"]
+    open_questions = data["open_questions"]
+
+    open_answers.append(message.text or "(пустой ответ)")
+    new_idx = idx + 1
+    await state.update_data(open_answers=open_answers, open_index=new_idx)
+
+    if new_idx < len(open_questions):
+        await send_next_open_question(message, state)
+        return
+
+    await finish_exam(message, message.from_user, state)
 
 
 # ---------------------------------------------------------------------------
