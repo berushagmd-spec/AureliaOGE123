@@ -81,6 +81,18 @@ CANCEL_TEXT = fix_dashes("""
 Хорошо, тест отменен. Если передумаешь - просто отправь /start заново.
 """).strip()
 
+APPROVED_TEXT = fix_dashes("""
+🎉 Поздравляем! По итогам экзамена тебе выдана админка в проекте "Аурелия".
+
+Добро пожаловать в команду!
+""").strip()
+
+REJECTED_TEXT = fix_dashes("""
+По итогам экзамена админы решили пока не выдавать тебе админку в проекте "Аурелия".
+
+Если хочешь - можно попробовать пройти тест снова позже.
+""").strip()
+
 
 # ---------------------------------------------------------------------------
 # Состояния
@@ -117,6 +129,14 @@ def build_mc_keyboard(q_index: int, options: list[str]) -> InlineKeyboardMarkup:
     for i, opt in enumerate(options):
         kb.button(text=truncate_button_text(opt), callback_data=f"ans:{q_index}:{i}")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def build_decision_kb(user_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Одобрить", callback_data=f"decision:approve:{user_id}")
+    kb.button(text="❌ Отклонить", callback_data=f"decision:reject:{user_id}")
+    kb.adjust(2)
     return kb.as_markup()
 
 
@@ -332,7 +352,9 @@ async def finish_exam(message: Message, user, state: FSMContext):
 
     bot: Bot = message.bot
     try:
-        await bot.send_message(config.ADMIN_GROUP_ID, report)
+        await bot.send_message(
+            config.ADMIN_GROUP_ID, report, reply_markup=build_decision_kb(user.id)
+        )
     except Exception as e:
         log.exception("Не удалось отправить отчет в группу проверяющих: %s", e)
         await message.answer(
@@ -364,6 +386,52 @@ async def on_open_answer(message: Message, state: FSMContext):
         return
 
     await finish_exam(message, message.from_user, state)
+
+
+@router.callback_query(F.data.startswith("decision:"))
+async def on_admin_decision(callback: CallbackQuery):
+    # Реагируем только на нажатия внутри группы проверяющих
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer()
+        return
+
+    _, action, user_id_str = callback.data.split(":")
+    candidate_id = int(user_id_str)
+
+    current_text = callback.message.text or ""
+    if "РЕШЕНИЕ:" in current_text:
+        await callback.answer("Решение по этому кандидату уже принято.", show_alert=True)
+        return
+
+    admin = callback.from_user
+    admin_name = f"@{admin.username}" if admin.username else (admin.full_name or "аноним")
+
+    if action == "approve":
+        decision_line = f"РЕШЕНИЕ: ✅ ОДОБРЕНО (принял(а) {admin_name})"
+        candidate_message = APPROVED_TEXT
+    else:
+        decision_line = f"РЕШЕНИЕ: ❌ ОТКЛОНЕНО (принял(а) {admin_name})"
+        candidate_message = REJECTED_TEXT
+
+    new_text = fix_dashes(f"{current_text}\n\n{decision_line}")
+
+    try:
+        await callback.message.edit_text(new_text, reply_markup=None)
+    except Exception as e:
+        log.exception("Не удалось обновить сообщение с решением: %s", e)
+
+    bot: Bot = callback.bot
+    try:
+        await bot.send_message(candidate_id, candidate_message)
+    except Exception as e:
+        log.exception("Не удалось отправить решение кандидату %s: %s", candidate_id, e)
+        await callback.answer(
+            "Решение сохранено, но кандидату не удалось написать (возможно, он не запускал бота в личке).",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("Решение отправлено кандидату.")
 
 
 # ---------------------------------------------------------------------------
